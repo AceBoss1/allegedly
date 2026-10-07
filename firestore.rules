@@ -1,0 +1,217 @@
+rules_version = '2';
+
+// Mirrors types/entities.ts. If you add a field/collection there, reflect the
+// access pattern here in the same PR — this file and that one should never
+// drift the way Allegedly_File_Map.md's table drifted from the code.
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    // ---- Phase 1 tier enforcement helpers ----
+    // This get() replaces a TODO comment that sat here since roughly
+    // Session 4: "Firestore rules can't easily read a joined users/{uid}.tier
+    // cheaply per-write without a get(), which is worth adding once Phase 1
+    // ships tier enforcement server-side." One get() per gist write is the
+    // accepted cost (Firestore bills it as an extra read) — cheaper than
+    // trusting a client-sent tier, which is exactly what authorTier on the
+    // Gist doc itself explicitly says never to do (see its doc comment in
+    // types/entities.ts: "Never trust a denormalized authorTier for
+    // permission checks server-side").
+    function callerTier() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data.tier;
+    }
+
+    // Mirrors types/entities.ts's TIER_POST_LIMITS — rules can't import a TS
+    // constant, so this has to be hand-kept in sync. If you change
+    // TIER_POST_LIMITS, change this in the same PR (same discipline this
+    // file's top-of-file comment already asks for).
+    function tierCharLimit(tier) {
+      return tier == 'premium_plus' ? 720 : (tier == 'premium' ? 360 : 180);
+    }
+
+    // ---- gists ----
+    match /gists/{gistId} {
+      allow read: if true; // gossip is public by design
+      allow create: if isSignedIn()
+        && request.resource.data.authorId == request.auth.uid
+        // Mirrors TIER_POST_LIMITS — was UI-only before Phase 1 (see
+        // types/entities.ts's caveat: "enforced client-side (UX) and
+        // server-side (integrity)" — the server half didn't exist yet).
+        && request.resource.data.text.size() <= tierCharLimit(callerTier())
+        // Mirrors HASHTAG_LIMIT (5), same "UI-only until now" gap.
+        && request.resource.data.tags.size() <= 5
+        // Standard tier is permanently anonymous (types/entities.ts's
+        // isAnonymousLocked doc comment: "enforced server-side, not just
+        // UI") — this is that enforcement. Premium/Premium+ may post
+        // anonymously too (their choice, per-post), just aren't forced to.
+        && (callerTier() != 'standard' || request.resource.data.isAnonymous == true);
+      // Edits are Premium/Premium+ only (the old Verified Source/Corporate
+      // tiers this comment used to reference before the Standard/Premium/
+      // Premium+ rename — see types/entities.ts's AccountTier comment).
+      // Standard-tier gists are create-once; PostComposer's edit UI should
+      // already hide/disable itself for Standard, this is the enforcement
+      // backstop for a client that skips the UI. authorId/createdAt are
+      // pinned so an edit can't reassign authorship or backdate a post.
+      allow update: if isSignedIn()
+        && resource.data.authorId == request.auth.uid
+        && callerTier() in ['premium', 'premium_plus']
+        && request.resource.data.authorId == resource.data.authorId
+        && request.resource.data.createdAt == resource.data.createdAt
+        && request.resource.data.text.size() <= tierCharLimit(callerTier());
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+    }
+
+    // ---- comments ----
+    match /comments/{commentId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
+      allow update, delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+    }
+
+    // ---- source-of-truth join tables: likes / saves / regists / highlights ----
+    // All four share the same shape and access pattern: doc id is
+    // `${userId}_${gistId}`, only the owning user may create/delete their own,
+    // nobody may update one in place (toggle = delete then create).
+    match /likes/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+    match /saves/{docId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+    match /regists/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+    match /highlights/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ---- votes (Truth Meter) ----
+    // Source of truth for consensus voting. One immutable doc per user per
+    // gist — no update, no delete, so a vote can't be quietly changed after
+    // the fact once it's counted into Gist.consensusTrue/False/NeedsMore.
+    match /votes/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---- userInteractions ----
+    // Denormalized read-mirror only (see types/entities.ts doc comment).
+    // Written exclusively by a Cloud Function trigger via the Admin SDK,
+    // which bypasses these rules entirely — so this collection has no client
+    // write path at all, on purpose.
+    match /userInteractions/{userId} {
+      allow read: if isOwner(userId);
+      allow write: if false;
+    }
+
+    // ---- follows ----
+    match /follows/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.followerId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.followerId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ---- gistSpots ----
+    match /gistSpots/{spotId} {
+      allow read: if true;
+      allow write: if false; // spot creation/moderation is an admin/server action for now
+    }
+
+    // ---- gistSpotMemberships ----
+    // User → Gist Spot "Join" (see lib/gist-spot-membership.tsx). Same pattern
+    // as follows, just user → spot instead of user → user.
+    match /gistSpotMemberships/{docId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.userId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ---- conversations / messages (Gist Me) ----
+    match /conversations/{conversationId} {
+      allow read, write: if isSignedIn() && request.auth.uid in resource.data.participantIds;
+    }
+    match /messages/{messageId} {
+      allow read: if isSignedIn() && request.auth.uid in get(/databases/$(database)/documents/conversations/$(resource.data.conversationId)).data.participantIds;
+      allow create: if isSignedIn() && request.resource.data.senderId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // ---- subscriptions / boosts ----
+    // Written exclusively by server-side webhook handlers (Stripe/Paystack)
+    // via the Admin SDK — never trust a client to tell us their own
+    // subscription is active.
+    match /subscriptions/{subId} {
+      allow read: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow write: if false;
+    }
+    match /boosts/{boostId} {
+      allow read: if true; // boosted-until timestamps are shown publicly on the gist
+      allow write: if false;
+    }
+
+    // ---- adRevenueLedger ----
+    // Manually reconciled for v1 (Tech Debt Report §Phase 3) — no client
+    // access at all.
+    match /adRevenueLedger/{entryId} {
+      allow read, write: if false;
+    }
+
+    // ---- stories ----
+    // 24h ephemeral media (see types/entities.ts Story). Expiry is enforced
+    // by (a) the client query filtering `where("expiresAt", ">", ...)` and
+    // (b) the scheduled Cloud Function that deletes expired docs
+    // (functions/src/story-cleanup.ts) — NOT by this rule anymore.
+    //
+    // Previous version was `allow read: if resource.data.expiresAt >
+    // request.time.toMillis()`, which looked reasonable but broke real-time
+    // listeners with "Missing or insufficient permissions": Firestore can't
+    // statically prove a live onSnapshot query will keep satisfying a rule
+    // built on `request.time`, since that condition's truth changes on its
+    // own as time passes even if the document never does — so it rejects
+    // the whole listener rather than risk streaming an update that would've
+    // violated the rule a moment later. Story content isn't sensitive
+    // (same "public gossip is public" threat model as gists), so there's no
+    // real security reason to gate the read at all — this now matches
+    // every other public-read collection in this file.
+    match /stories/{storyId} {
+      allow read: if true;
+      allow create: if isSignedIn() && request.resource.data.authorId == request.auth.uid;
+      allow delete: if isSignedIn() && resource.data.authorId == request.auth.uid;
+      allow update: if false;
+    }
+
+    // ---- reports ----
+    // Write-only from the client's perspective: anyone signed in can file a
+    // report, but only the reporter can read their own submission back, and
+    // nobody can read someone else's report or the moderation queue directly
+    // (that's a server-side/admin-console job).
+    match /reports/{reportId} {
+      allow create: if isSignedIn() && request.resource.data.reporterId == request.auth.uid;
+      allow read: if isSignedIn() && resource.data.reporterId == request.auth.uid;
+      allow update, delete: if false;
+    }
+  }
+}

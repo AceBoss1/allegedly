@@ -1,0 +1,21 @@
+{
+  "name": "allegedly-functions",
+  "description": "Cloud Functions for Allegedly — not yet deployed, see Deployment Guide",
+  "main": "lib/index.js",
+  "scripts": {
+    "build": "tsc",
+    "deploy": "firebase deploy --only functions"
+  },
+  "engines": {
+    "node": "20"
+  },
+  "dependencies": {
+    "firebase-admin": "^12.0.0",
+    "firebase-functions": "^5.0.0",
+    "cloudinary": "^2.0.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.4.0"
+  },
+  "private": true
+}

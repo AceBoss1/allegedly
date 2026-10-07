@@ -1,0 +1,13 @@
+{
+  "indexes": [
+    {
+      "collectionGroup": "regists",
+      "queryScope": "COLLECTION",
+      "fields": [
+        { "fieldPath": "gistId", "order": "ASCENDING" },
+        { "fieldPath": "createdAt", "order": "DESCENDING" }
+      ]
+    }
+  ],
+  "fieldOverrides": []
+}
