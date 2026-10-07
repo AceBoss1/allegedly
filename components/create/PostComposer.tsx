@@ -53,11 +53,9 @@ function parseHashtagInput(raw: string): string[] {
 /**
  * NOTE on enforcement: this component enforces the character limit and the
  * HASHTAG_LIMIT client-side for UX (instant feedback, disabled submit
- * button). That is NOT sufficient on its own — per Tech Debt Report §2, the
- * same limits must be re-checked server-side (Cloud Function on write, or a
- * Firestore rule using request.resource.data.text.size()) so a modified
- * client can't bypass this. That server-side check isn't in this file; wire
- * it before launch.
+ * button). The same limits are re-checked server-side in firestore.rules
+ * (tierCharLimit / tags.size() <= 5), which must be hand-kept in sync with
+ * TIER_POST_LIMITS / HASHTAG_LIMIT in types/entities.ts.
  */
 export default function PostComposer({
   // Fallback only for signed-out/dev preview — once signed in, the real
@@ -187,7 +185,9 @@ export default function PostComposer({
         tags: hashtags,
         mediaUrls: mediaResult ? [mediaResult.url] : [],
         mediaPublicIds: mediaResult ? [mediaResult.publicId] : [],
-        mediaType: mediaResult ? "image" : undefined,
+        // Spread, not `mediaType: undefined` — getFirestore() rejects undefined
+        // field values, which would fail every text-only post.
+        ...(mediaResult ? { mediaType: "image" } : {}),
         consensusTrue: 0,
         consensusFalse: 0,
         consensusNeedsMore: 0,
@@ -204,7 +204,11 @@ export default function PostComposer({
       router.push("/feed");
     } catch (err) {
       console.error("Failed to create gist", err);
-      setError("Something went wrong posting your gist. Try again.");
+      setError(
+        (err as { code?: string })?.code === "permission-denied"
+          ? `Post rejected — check it is within ${limit.chars} characters and ${HASHTAG_LIMIT} hashtags for your tier.`
+          : "Something went wrong posting your gist. Try again."
+      );
     } finally {
       setSubmitting(false);
     }

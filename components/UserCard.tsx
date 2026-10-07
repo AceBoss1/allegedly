@@ -2,7 +2,7 @@ import Link from "next/link";
 import type { AccountTier } from "@/types/entities";
 
 function tierBadge(tier: AccountTier) {
-  if (tier === "basic") return null;
+  if (tier === "standard") return null;
   return (
     <svg viewBox="0 0 20 20" className="h-3.5 w-3.5 fill-cyan shrink-0">
       <path d="M10 0l2.245 1.635 2.775-.402 1.19 2.522 2.522 1.19-.402 2.775L20 10l-1.635 2.245.402 2.775-2.522 1.19-1.19 2.522-2.775-.402L10 20l-2.245-1.635-2.775.402-1.19-2.522-2.522-1.19.402-2.775L0 10l1.635-2.245-.402-2.775 2.522-1.19 1.19-2.522 2.775.402L10 0z" />
